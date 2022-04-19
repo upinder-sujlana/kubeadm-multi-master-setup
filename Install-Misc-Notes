@@ -1,4 +1,11 @@
 ```
+[+] My setup is a vmware workstation based 5 VM. Lab network is 192.168.1.x/24 
+
+192.168.1.80 loadbalancer
+192.168.1.81 master1
+192.168.1.82 master2
+192.168.1.83 worker1
+192.168.1.84 worker2
 
 
 [+] Make the user a root use
