@@ -1,0 +1,299 @@
+```
+
+
+[+] Make the user a root use
+    sudo adduser <USERNAME>
+	sudo usermod -a -G sudo  <USERNAME>
+	
+	I did create a user, but I stuck with "root" throughout & works.
+	sudo adduser kubernetes-user
+	sudo usermod -a -G sudo kubernetes-user
+
+[+] Enable SSH service
+	sudo apt-get update
+	sudo apt-get install openssh-server -y
+	sudo ufw allow ssh
+	service ssh status
+
+[+] disable the firewall (as this is a lab, optional step)
+sudo ufw disable
+
+[+] Update the /etc/hosts
+127.0.0.1  <NAME of Server>
+192.168.1.80 loadbalancer
+192.168.1.81 master1
+192.168.1.82 master2
+192.168.1.83 worker1
+192.168.1.84 worker2
+
+[+] Update the server-name in /etc/hostname
+
+[+] On Master & Worker nodes turn off swap
+sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+swapoff -a
+reboot
+https://medium.com/@upigrad/kubernetes-cluster-create-101-695d6b5f5fa
+
+[+] As this is vmware workstaion based vm (optional)
+sudo apt-get install open-vm-tools
+sudo apt-get install open-vm-tools-desktop
+init 6
+
+
+
+[+] Configure the loadbalancer file "/etc/haproxy/haproxy.cfg" add below at the end
+
+frontend fe-apiserver
+   bind 0.0.0.0:6443
+   mode tcp
+   option tcplog
+   default_backend be-apiserver
+   
+backend be-apiserver
+   mode tcp
+   option tcplog
+   option tcp-check
+   balance roundrobin
+   default-server inter 10s downinter 5s rise 2 fall 2 slowstart 60s maxconn 250 maxqueue 256 weight 100
+
+       server master1 192.168.1.81:6443 check
+       server master2 192.168.1.82:6443 check
+ 
+[+] With the new cgroup style docker and kubelet need a new setup. More theory here
+	https://github.com/kubernetes/kubernetes/issues/43805 
+	https://kubernetes.io/docs/tasks/administer-cluster/kubeadm/configure-cgroup-driver/
+
+[-][-] first made sure docker is using cgroupfs
+
+root@master1:~# docker info |grep -i cgroup
+WARNING: No swap limit support
+ Cgroup Driver: cgroupfs 
+ Cgroup Version: 1
+root@master1:~#
+
+[-][-] Then created the file
+
+root@master1:~# cat kubeadm-config.yaml
+# kubeadm-config.yaml
+kind: ClusterConfiguration
+apiVersion: kubeadm.k8s.io/v1beta3
+kubernetesVersion: v1.23.5
+controlPlaneEndpoint: "loadbalancer:6443"
+networking:
+  podSubnet: "10.244.0.0/16"
+---
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+cgroupDriver: cgroupfs
+
+root@master1:~#
+
+[+] Create the cluster
+root@master1:~# kubeadm init --upload-certs --config kubeadm-config.yaml
+
+
+Note - As always k8s had issues & I had to do below re-run above "kubeadm init" (I know bad k8s)
+kubeadm reset
+systemctl restart kubelet
+
+
+[+] Record the output of the above command (IMPORTANT)
+
+<snip>
+[addons] Applied essential addon: CoreDNS
+[addons] Applied essential addon: kube-proxy
+
+Your Kubernetes control-plane has initialized successfully!
+
+To start using your cluster, you need to run the following as a regular user:
+
+  mkdir -p $HOME/.kube
+  sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+  sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+Alternatively, if you are the root user, you can run:
+
+  export KUBECONFIG=/etc/kubernetes/admin.conf
+
+You should now deploy a pod network to the cluster.
+Run "kubectl apply -f [podnetwork].yaml" with one of the options listed at:
+  https://kubernetes.io/docs/concepts/cluster-administration/addons/
+
+You can now join any number of the control-plane node running the following command on each as root:
+
+  kubeadm join loadbalancer:6443 --token iayd1z.57sakl6xlcqumxsj \
+        --discovery-token-ca-cert-hash sha256:97602c539bc970999189f15e10a89d72a89b82e982a86c1470b18a9c1ae15c87 \
+        --control-plane --certificate-key 3282ab61dd4b06eaa40447306144fc475f4dc56bf07b9ac4ec08b9d1c711d2b3
+
+Please note that the certificate-key gives access to cluster sensitive data, keep it secret!
+As a safeguard, uploaded-certs will be deleted in two hours; If necessary, you can use
+"kubeadm init phase upload-certs --upload-certs" to reload certs afterward.
+
+Then you can join any number of worker nodes by running the following on each as root:
+
+kubeadm join loadbalancer:6443 --token iayd1z.57sakl6xlcqumxsj \
+        --discovery-token-ca-cert-hash sha256:97602c539bc970999189f15e10a89d72a89b82e982a86c1470b18a9c1ae15c87
+
+
+
+
+
+[+] I used flannel rather than calico as the video used
+root@loadbalancer:~/.kube# kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+Warning: policy/v1beta1 PodSecurityPolicy is deprecated in v1.21+, unavailable in v1.25+
+podsecuritypolicy.policy/psp.flannel.unprivileged created
+clusterrole.rbac.authorization.k8s.io/flannel created
+clusterrolebinding.rbac.authorization.k8s.io/flannel created
+serviceaccount/flannel created
+configmap/kube-flannel-cfg created
+daemonset.apps/kube-flannel-ds created
+root@loadbalancer:~/.kube#
+
+[+] Somehow ran into the issue where coredns pods would not run
+root@loadbalancer:~/.kube# kubectl get pods -n kube-system
+NAME                              READY   STATUS             RESTARTS         AGE
+coredns-64897985d-l7lx9           0/1     CrashLoopBackOff   11 (2m41s ago)   13m
+coredns-64897985d-rvt68           0/1     CrashLoopBackOff   12 (5s ago)      13m
+
+[-][-]First made sure "/run/flannel/subnet.env"  file exists & looks ok.
+https://github.com/kubernetes/kubernetes/issues/70202
+
+[-][-] Fixed using below, This is how it looked like after I made the changes:
+https://stackoverflow.com/questions/53559291/kubernetes-coredns-in-crashloopbackoff
+root@loadbalancer:~/.kube# kubectl -n kube-system edit configmaps coredns -o yaml
+apiVersion: v1
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . 172.16.232.1 {
+           max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2022-04-17T23:38:03Z"
+  name: coredns
+  namespace: kube-system
+  resourceVersion: "2720"
+  uid: 3b51cbb3-593f-4220-9f77-4a2bf84729e2
+root@loadbalancer:~/.kube#
+
+[+] After
+root@loadbalancer:~/.kube# kubectl get pods -n kube-system
+NAME                              READY   STATUS    RESTARTS      AGE
+coredns-64897985d-dzllv           1/1     Running   0             107s
+coredns-64897985d-gllh9           1/1     Running   0             2m10s
+etcd-master1                      1/1     Running   3 (12m ago)   19m
+etcd-master2                      1/1     Running   3 (12m ago)   17m
+kube-apiserver-master1            1/1     Running   3 (12m ago)   19m
+kube-apiserver-master2            1/1     Running   5 (12m ago)   17m
+kube-controller-manager-master1   1/1     Running   5 (12m ago)   19m
+kube-controller-manager-master2   1/1     Running   3 (12m ago)   17m
+kube-flannel-ds-4gtwv             1/1     Running   2 (11m ago)   13m
+kube-flannel-ds-4wcld             1/1     Running   2 (11m ago)   13m
+kube-flannel-ds-prxc8             1/1     Running   2 (11m ago)   13m
+kube-flannel-ds-shjgz             1/1     Running   2 (11m ago)   13m
+kube-proxy-4xw87                  1/1     Running   1 (12m ago)   16m
+kube-proxy-bq464                  1/1     Running   1 (12m ago)   19m
+kube-proxy-ldlps                  1/1     Running   1 (12m ago)   17m
+kube-proxy-smwjw                  1/1     Running   1 (12m ago)   16m
+kube-scheduler-master1            1/1     Running   5 (12m ago)   19m
+kube-scheduler-master2            1/1     Running   3 (12m ago)   17m
+root@loadbalancer:~/.kube#
+root@loadbalancer:~# kubectl get nodes -o wide
+NAME      STATUS   ROLES                  AGE    VERSION   INTERNAL-IP    EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION       CONTAINER-RUNTIME
+master1   Ready    control-plane,master   140m   v1.23.5   192.168.1.81   <none>        Ubuntu 16.04.7 LTS   4.15.0-112-generic   docker://20.10.7
+master2   Ready    control-plane,master   138m   v1.23.5   192.168.1.82   <none>        Ubuntu 16.04.7 LTS   4.15.0-112-generic   docker://20.10.7
+worker1   Ready    <none>                 137m   v1.23.5   192.168.1.83   <none>        Ubuntu 16.04.7 LTS   4.15.0-112-generic   docker://20.10.7
+worker2   Ready    <none>                 137m   v1.23.5   192.168.1.84   <none>        Ubuntu 16.04.7 LTS   4.15.0-112-generic   docker://20.10.7
+root@loadbalancer:~#
+
+[+] Are the master/worker nodes actually listening on loadbalancer port 6443 ?
+(Below 192.168.1.10 is my PC ip)
+root@loadbalancer:~# netstat -tn src :6443 | sort
+Active Internet connections (w/o servers)
+Proto Recv-Q Send-Q Local Address           Foreign Address         State
+tcp        0      0 192.168.1.80:22         192.168.1.10:58496      ESTABLISHED
+tcp        0      0 192.168.1.80:22         192.168.1.10:58498      ESTABLISHED
+tcp        0      0 192.168.1.80:54616      192.168.1.81:6443       ESTABLISHED
+tcp        0      0 192.168.1.80:54618      192.168.1.81:6443       ESTABLISHED
+tcp        0      0 192.168.1.80:54630      192.168.1.81:6443       ESTABLISHED
+tcp        0      0 192.168.1.80:54632      192.168.1.81:6443       ESTABLISHED
+tcp        0      0 192.168.1.80:54658      192.168.1.81:6443       ESTABLISHED
+tcp        0      0 192.168.1.80:54664      192.168.1.81:6443       ESTABLISHED
+tcp        0      0 192.168.1.80:55216      192.168.1.82:6443       ESTABLISHED
+tcp        0      0 192.168.1.80:55222      192.168.1.82:6443       ESTABLISHED
+tcp        0      0 192.168.1.80:6443       192.168.1.81:43752      ESTABLISHED
+tcp        0      0 192.168.1.80:6443       192.168.1.81:43758      ESTABLISHED
+tcp        0      0 192.168.1.80:6443       192.168.1.82:55138      ESTABLISHED
+tcp        0      0 192.168.1.80:6443       192.168.1.82:55166      ESTABLISHED
+tcp        0      0 192.168.1.80:6443       192.168.1.83:56800      ESTABLISHED
+tcp        0      0 192.168.1.80:6443       192.168.1.83:56804      ESTABLISHED
+tcp        0      0 192.168.1.80:6443       192.168.1.84:58398      ESTABLISHED
+tcp        0      0 192.168.1.80:6443       192.168.1.84:58400      ESTABLISHED
+root@loadbalancer:~#
+
+
+[+] Testing
+root@loadbalancer:~/.kube# kubectl run nginx --image=nginx
+pod/nginx created
+root@loadbalancer:~/.kube#
+root@loadbalancer:~/.kube# kubectl get pods -o wide
+NAME    READY   STATUS    RESTARTS   AGE   IP           NODE      NOMINATED NODE   READINESS GATES
+nginx   1/1     Running   0          14s   10.244.2.3   worker1   <none>           <none>
+root@loadbalancer:~/.kube#
+root@loadbalancer:~# kubectl expose pod nginx --port=80 --type=NodePort
+service/nginx exposed
+root@loadbalancer:~#
+root@loadbalancer:~# curl 192.168.1.83:32401
+<!DOCTYPE html>
+<html>
+<head>
+<title>Welcome to nginx!</title>
+<style>
+html { color-scheme: light dark; }
+body { width: 35em; margin: 0 auto;
+font-family: Tahoma, Verdana, Arial, sans-serif; }
+</style>
+</head>
+<body>
+<h1>Welcome to nginx!</h1>
+<p>If you see this page, the nginx web server is successfully installed and
+working. Further configuration is required.</p>
+
+<p>For online documentation and support please refer to
+<a href="http://nginx.org/">nginx.org</a>.<br/>
+Commercial support is available at
+<a href="http://nginx.com/">nginx.com</a>.</p>
+
+<p><em>Thank you for using nginx.</em></p>
+</body>
+</html>
+root@loadbalancer:~#
+
+
+[+] Some usefull links
+https://github.com/upinder-sujlana/kubeadm-multi-master-setup
+https://www.nakivo.com/blog/install-kubernetes-ubuntu/
+https://averagelinuxuser.com/kubernetes_containerd/
+
+
+
+
+
+```
