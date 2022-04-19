@@ -1,4 +1,4 @@
-```
+
 [+] My setup is a vmware workstation based 5 VM. Lab network is 192.168.1.x/24 
 
 192.168.1.80 loadbalancer
@@ -303,4 +303,4 @@ https://averagelinuxuser.com/kubernetes_containerd/
 
 
 
-```
+
